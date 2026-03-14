@@ -31,28 +31,19 @@ client = genai.Client(api_key=GOOGLE_API_KEY)
 # ==========================================
 def send_discord_message(content):
     if not DISCORD_WEBHOOK_URL:
-        print("❌ 錯誤：找不到 Discord Webhook 網址！請檢查 GitHub Secrets。")
         return
-        
     data = {"content": content}
     try:
-        print(f"👉 正在嘗試發送訊息至 Discord (字數: {len(content)})...")
-        response = requests.post(DISCORD_WEBHOOK_URL, json=data)
-        
-        # 強制印出 Discord 伺服器的回應
-        if response.status_code in [200, 204]:
-            print("✅ Discord 接收成功！")
-        else:
-            print(f"❌ Discord 拒絕接收！錯誤碼: {response.status_code}")
-            print(f"❌ 錯誤詳情: {response.text}")
+        # 加入小延遲避免 Discord 機器人發送過快被擋
+        time.sleep(1)
+        requests.post(DISCORD_WEBHOOK_URL, json=data)
     except Exception as e:
-        print(f"❌ 網路連線或發送異常: {e}")
+        print(f"❌ Discord 發送異常: {e}")
 
 def get_stock_report(symbol):
     try:
         df = yf.download(symbol, period="60d", interval="1d", progress=False, auto_adjust=True)
         if df.empty or len(df) < 35: 
-            print(f"⚠️ {symbol}: 抓不到足夠的歷史資料，跳過。")
             return None
             
         if isinstance(df.columns, pd.MultiIndex):
@@ -68,45 +59,46 @@ def get_stock_report(symbol):
         last_rsi = float((100 - (100 / (1 + (gain / loss)))).iloc[-1])
 
         is_alert = last_rsi < 35
-        alert_tag = "🚨 **[觸發低檔警報]** " if is_alert else "📊 **[例行診斷]** "
 
-        prompt = (f"你是操盤手。{symbol}現價{last_close:.2f}，RSI {last_rsi:.1f}，"
-                  f"支撐{support:.2f}/壓力{resistance:.2f}。請用20字內給出操作建議。")
-        
-        ai_response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt
-        )
-        print(f"🤖 {symbol}: AI 分析完成。")
-        return f"{alert_tag}**{symbol}**: `{last_close:.2f}`\n> {ai_response.text.strip()}\n"
+        # 核心優化：只有觸發警報時才使用 AI，平時自己用數學算建議
+        if is_alert:
+            alert_tag = "🚨 **[極度低估警報]** "
+            prompt = (f"你是操盤手。{symbol}現價{last_close:.2f}，RSI {last_rsi:.1f}，"
+                      f"支撐{support:.2f}/壓力{resistance:.2f}。請用20字內給出操作建議。")
+            ai_response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+            advice = ai_response.text.strip()
+        else:
+            alert_tag = "📊 **[例行診斷]** "
+            advice = f"建議區間操作。跌近支撐 ({support:.2f}) 可撿，靠近壓力 ({resistance:.2f}) 考慮分批賣。"
+
+        return f"{alert_tag}**{symbol}**: `{last_close:.2f}`\n> {advice}\n"
     except Exception as e:
-        print(f"❌ {symbol} 執行錯誤: {str(e)}")
         return f"❌ {symbol} 錯誤: {str(e)}\n"
 
 # ==========================================
 # 3. 主程式
 # ==========================================
 def main():
-    print(f"[{datetime.now()}] 🚀 啟動除錯版 Discord 市場掃描...")
+    print(f"[{datetime.now()}] 🚀 啟動優化版 Discord 市場掃描...")
     
-    # 為了測試速度，我們暫時只掃描前 5 檔股票就好，找出問題比較快！
-    test_list = TARGET_LIST[:5] 
-    
-    batch_reports = []
-    for symbol in test_list:
-        print(f"🔍 開始處理: {symbol}...")
-        report = get_stock_report(symbol)
-        if report:
-            batch_reports.append(report)
-        time.sleep(1) 
-    
-    if batch_reports:
-        full_msg = "📈 **股市深度診斷報告 (測試)**\n" + "\n".join(batch_reports)
-        send_discord_message(full_msg)
-    else:
-        print("⚠️ 警告：所有股票分析都失敗，無法生成報告！")
+    # 每次最多塞 5 檔股票，絕對不會超過 Discord 的 2000 字限制
+    batch_size = 5 
+    for i in range(0, len(TARGET_LIST), batch_size):
+        batch = TARGET_LIST[i:i + batch_size]
+        batch_reports = []
         
-    print("✅ 程式執行結束。")
+        for symbol in batch:
+            report = get_stock_report(symbol)
+            if report:
+                batch_reports.append(report)
+            # 延遲 2 秒，確保不會撞到任何 API 頻率限制
+            time.sleep(2) 
+        
+        if batch_reports:
+            full_msg = f"📈 **股市巡邏 (第 {i//batch_size + 1} 組)**\n" + "\n".join(batch_reports)
+            send_discord_message(full_msg)
+            
+    print("✅ 掃描並發送完畢。")
 
 if __name__ == "__main__":
     main()
