@@ -62,7 +62,7 @@ def get_stock_report(symbol):
                   f"支撐{support:.2f}/壓力{resistance:.2f}。請用20字內給出操作建議。")
         
         response = client.models.generate_content(
-            model='gemini-1.5-flash',
+            model='gemini-2.5-flash',
             contents=prompt
         )
         
