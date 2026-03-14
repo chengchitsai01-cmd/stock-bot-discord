@@ -51,9 +51,9 @@ def get_full_report(symbol):
         prev_close = df['Close'].iloc[-2]
         change_pct = ((last_close - prev_close) / prev_close) * 100
         
-        # 均線計算
+        # 均線與指標
         ma20 = df['Close'].tail(20).mean()
-        ma60 = df['Close'].tail(60).mean() # 加入季線判斷長線趨勢
+        ma60 = df['Close'].tail(60).mean()
         bias_20 = ((last_close - ma20) / ma20) * 100
         
         delta = df['Close'].diff()
@@ -65,28 +65,39 @@ def get_full_report(symbol):
         vol_ratio = df['Volume'].iloc[-1] / avg_vol if avg_vol > 0 else 1
 
         # ==========================================
-        # 🎯 進出場決策邏輯 (紅綠燈系統)
+        # 🎯 進出場決策邏輯 
         # ==========================================
         action_advice = ""
-        
-        # 1. 判斷危險/出場訊號 (風險優先)
         if rsi >= 75 or bias_20 >= 8:
             action_advice = "🔴 【逢高停利】短線已過熱，留意拉回風險，建議分批獲利了結。"
         elif last_close < ma20 and prev_close >= ma20:
             action_advice = "🔴 【破線警報】剛跌破月線支撐，趨勢轉弱，建議減碼或停損。"
-        
-        # 2. 判斷進場訊號
         elif last_close > ma20 and vol_ratio > 1.5 and rsi < 65:
             action_advice = "🟢 【強勢進場】帶量突破月線，動能強勁，可考慮順勢佈局。"
         elif last_close > ma60 and abs(bias_20) < 3 and rsi < 45:
             action_advice = "🟢 【拉回找買點】長線多頭但短線拉回月線附近，是不錯的低接機會。"
-            
-        # 3. 觀望
         else:
             action_advice = "🟡 【觀望為主】目前無明顯進出場訊號，建議多看少做。"
 
         # ==========================================
+        # 📰 抓取最新新聞 (新增功能)
+        # ==========================================
+        news_text = ""
+        try:
+            news_list = ticker.news
+            if news_list and len(news_list) > 0:
+                # 只取前 2 篇最新新聞
+                for article in news_list[:2]:
+                    title = article.get('title', '')
+                    publisher = article.get('publisher', '新聞')
+                    if title:
+                        news_text += f"> 🔹 {title} *({publisher})*\n"
+            if not news_text:
+                news_text = "> 🔹 近期無重大相關新聞\n"
+        except:
+            news_text = "> 🔹 新聞讀取失敗\n"
 
+        # 組合報告
         report = (
             f"🏠 **{comp_name} ({symbol})**\n"
             f"💰 **市價**: `{last_close:.2f}` ({change_pct:+.2f}%)\n"
@@ -96,7 +107,9 @@ def get_full_report(symbol):
             f"> RSI: `{rsi:.1f}` | {make_bar(rsi)}\n"
             f"> 量比: `{vol_ratio:.1f}x` | {make_bar(vol_ratio * 20)}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"🎯 **操作建議**:\n> **{action_advice}**"
+            f"🎯 **操作建議**:\n> **{action_advice}**\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📰 **最新市場消息**:\n{news_text}"
         )
         return report
     except Exception as e:
@@ -114,7 +127,7 @@ async def on_message(message):
         target_symbol = NAME_TO_SYMBOL[content]
 
     if target_symbol:
-        msg = await message.channel.send(f"🔍 正在研判 **{STOCK_MAP.get(target_symbol, content)}** 的進出場時機...")
+        msg = await message.channel.send(f"🔍 正在研判 **{STOCK_MAP.get(target_symbol, content)}** 的數據與最新消息...")
         report = get_full_report(target_symbol)
         await msg.edit(content=report if report else "❌ 暫時無法分析。")
 
@@ -122,7 +135,7 @@ async def on_message(message):
 
 @bot.event
 async def on_ready():
-    print(f'✅ 決策機器人 {bot.user} 上線')
+    print(f'✅ 讀報計算機 {bot.user} 上線')
     if not auto_scan.is_running(): auto_scan.start()
 
 @tasks.loop(hours=2)
@@ -132,7 +145,6 @@ async def auto_scan():
     if not channel: return
     for s in STOCK_MAP.keys():
         r = get_full_report(s)
-        # 巡邏時只報有進場或出場訊號的股票
         if r and ("🟢" in r or "🔴" in r): 
             await channel.send("📢 **[市場異動警報]**\n" + r)
         await asyncio.sleep(2)
