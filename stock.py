@@ -4,7 +4,6 @@ import pandas as pd
 import requests
 from datetime import datetime
 import time
-# 改用新版的 Google GenAI 套件
 from google import genai 
 
 # ==========================================
@@ -25,23 +24,37 @@ TARGET_LIST = [
     "4569.TW", "3484.TWO", "3013.TW", "3162.TWO", "6982.TWO"
 ]
 
-# 建立新版 Client
 client = genai.Client(api_key=GOOGLE_API_KEY)
 
 # ==========================================
 # 2. 功能函數
 # ==========================================
 def send_discord_message(content):
+    if not DISCORD_WEBHOOK_URL:
+        print("❌ 錯誤：找不到 Discord Webhook 網址！請檢查 GitHub Secrets。")
+        return
+        
     data = {"content": content}
     try:
-        requests.post(DISCORD_WEBHOOK_URL, json=data)
+        print(f"👉 正在嘗試發送訊息至 Discord (字數: {len(content)})...")
+        response = requests.post(DISCORD_WEBHOOK_URL, json=data)
+        
+        # 強制印出 Discord 伺服器的回應
+        if response.status_code in [200, 204]:
+            print("✅ Discord 接收成功！")
+        else:
+            print(f"❌ Discord 拒絕接收！錯誤碼: {response.status_code}")
+            print(f"❌ 錯誤詳情: {response.text}")
     except Exception as e:
-        print(f"Discord 發送異常: {e}")
+        print(f"❌ 網路連線或發送異常: {e}")
 
 def get_stock_report(symbol):
     try:
         df = yf.download(symbol, period="60d", interval="1d", progress=False, auto_adjust=True)
-        if df.empty or len(df) < 35: return None
+        if df.empty or len(df) < 35: 
+            print(f"⚠️ {symbol}: 抓不到足夠的歷史資料，跳過。")
+            return None
+            
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
@@ -57,45 +70,43 @@ def get_stock_report(symbol):
         is_alert = last_rsi < 35
         alert_tag = "🚨 **[觸發低檔警報]** " if is_alert else "📊 **[例行診斷]** "
 
-        # 使用新版的 generate_content 寫法
         prompt = (f"你是操盤手。{symbol}現價{last_close:.2f}，RSI {last_rsi:.1f}，"
                   f"支撐{support:.2f}/壓力{resistance:.2f}。請用20字內給出操作建議。")
         
-        response = client.models.generate_content(
+        ai_response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=prompt
         )
-        
-        return f"{alert_tag}**{symbol}**: `{last_close:.2f}`\n> {response.text.strip()}\n"
+        print(f"🤖 {symbol}: AI 分析完成。")
+        return f"{alert_tag}**{symbol}**: `{last_close:.2f}`\n> {ai_response.text.strip()}\n"
     except Exception as e:
+        print(f"❌ {symbol} 執行錯誤: {str(e)}")
         return f"❌ {symbol} 錯誤: {str(e)}\n"
 
 # ==========================================
 # 3. 主程式
 # ==========================================
 def main():
-    if not DISCORD_WEBHOOK_URL:
-        print("缺少 DISCORD_WEBHOOK_URL 設定。")
-        return
-
-    print(f"[{datetime.now()}] 啟動 Discord 市場掃描 (新版 API)...")
+    print(f"[{datetime.now()}] 🚀 啟動除錯版 Discord 市場掃描...")
     
-    batch_size = 10
-    for i in range(0, len(TARGET_LIST), batch_size):
-        batch = TARGET_LIST[i:i + batch_size]
-        batch_reports = []
+    # 為了測試速度，我們暫時只掃描前 5 檔股票就好，找出問題比較快！
+    test_list = TARGET_LIST[:5] 
+    
+    batch_reports = []
+    for symbol in test_list:
+        print(f"🔍 開始處理: {symbol}...")
+        report = get_stock_report(symbol)
+        if report:
+            batch_reports.append(report)
+        time.sleep(1) 
+    
+    if batch_reports:
+        full_msg = "📈 **股市深度診斷報告 (測試)**\n" + "\n".join(batch_reports)
+        send_discord_message(full_msg)
+    else:
+        print("⚠️ 警告：所有股票分析都失敗，無法生成報告！")
         
-        for symbol in batch:
-            report = get_stock_report(symbol)
-            if report:
-                batch_reports.append(report)
-            time.sleep(1) 
-        
-        if batch_reports:
-            full_msg = f"📈 **股市深度診斷報告 (第 {i//batch_size + 1} 組)**\n" + "\n".join(batch_reports)
-            send_discord_message(full_msg)
-            
-    print("✅ 掃描完畢，訊息已發送至 Discord。")
+    print("✅ 程式執行結束。")
 
 if __name__ == "__main__":
     main()
