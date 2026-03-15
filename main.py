@@ -30,7 +30,7 @@ STOCK_NAMES = {
 }
 WATCHLIST = list(STOCK_NAMES.keys())
 
-# 建立反向字典，讓機器人可以聽懂「台積電」並轉成「2330.TW」
+# 建立反向字典，讓機器人可以聽懂中文名稱並轉成代碼
 REVERSE_STOCK_NAMES = {v: k for k, v in STOCK_NAMES.items()}
 
 # --- 狀態記憶功能 ---
@@ -99,11 +99,11 @@ async def process_stock_query(channel, symbol):
         await channel.send("❌ 查詢失敗，可能是 Yahoo Finance 阻擋了請求。")
 
 # ==========================================
-# 4. 全頻道智慧監聽 (無指令觸發)
+# 4. 全頻道智慧監聽 (無指令觸發 + 老闆暗號)
 # ==========================================
 @bot.event
 async def on_message(message):
-    # 🎧 聽診器：只要頻道有人講話，就在你的黑色終端機畫面印出來
+    # 🎧 聽診器：只要頻道有人講話，就在終端機畫面印出來
     print(f"💬 [對話紀錄] {message.author}: {message.content}")
 
     # 避免機器人自己回自己，造成無限迴圈
@@ -112,6 +112,13 @@ async def on_message(message):
 
     # 取得使用者輸入的文字並去除前後空白
     content = message.content.strip()
+
+    # 🌟 老闆專屬暗號：強制呼叫大盤與投資組合報告
+    if content in ["全面掃描", "大盤", "投資組合"]:
+        await message.channel.send("🚀 收到指令！正在喚醒量化經理人，執行全市場掃描...")
+        await perform_scan(force_send=True) # 強制發送報告
+        return
+
     target_symbol = None
 
     # 智慧判斷邏輯：
@@ -135,7 +142,7 @@ async def on_message(message):
 # ==========================================
 # 5. 核心量化引擎 (定時大盤與名單掃描，含投資組合配置)
 # ==========================================
-async def perform_scan():
+async def perform_scan(force_send=False):
     channel = bot.get_channel(int(CHANNEL_ID))
     if not channel: 
         print("找不到頻道！請確認環境變數 CHANNEL_ID 是否正確。")
@@ -194,8 +201,15 @@ async def perform_scan():
     now = datetime.now()
     is_monday_morning = (now.weekday() == 0 and now.hour < 11)
 
-    if current_state_signature != last_state or is_monday_morning:
-        header = "🔄 **【量化策略組合變更通知】**\n" if current_state_signature != last_state else "📅 **【每週量化巡邏報告】**\n"
+    # 🌟 邏輯修改：加上 force_send，只要是你手動查的，就算狀態沒變也會印出來給你！
+    if force_send or current_state_signature != last_state or is_monday_morning:
+        if force_send:
+            header = "🚀 **【手動全面掃描報告】**\n"
+        elif current_state_signature != last_state:
+            header = "🔄 **【量化策略組合變更通知】**\n"
+        else:
+            header = "📅 **【每週量化巡邏報告】**\n"
+            
         await channel.send(header + "\n".join(msg_lines))
         save_state(current_state_signature)
 
@@ -226,7 +240,7 @@ async def on_ready():
         channel = bot.get_channel(int(CHANNEL_ID))
         if channel:
             print("🟢 進入常駐監聽模式，等待 Discord 頻道指令...")
-            await channel.send("🟢 **量化大腦已連線！您可以直接在頻道輸入「股票代碼 (如 2330)」或「中文名稱 (如 台積電)」，我會立刻為您分析策略。**")
+            await channel.send("🟢 **量化大腦已連線！您可以直接在頻道輸入「股票代碼 (如 2330)」查個股，或輸入「全面掃描」來查看大盤與投資組合策略。**")
 
 if __name__ == "__main__":
     bot.run(DISCORD_BOT_TOKEN)
