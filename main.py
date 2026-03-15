@@ -201,81 +201,77 @@ async def fetch_single_stock_data(symbol):
         print(f"抓取 {symbol} 失敗: {e}")
         return symbol, pd.DataFrame() # 失敗回傳空 DataFrame
 
+async def fetch_single_stock_data(symbol):
+    """
+    使用自訂 Session 抓取資料，並解開超時限制，讓 Render 慢慢算
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        df = await loop.run_in_executor(
+            None, 
+            lambda: yf.Ticker(symbol, session=session).history(period="1y")
+        )
+        return symbol, df
+    except Exception as e:
+        print(f"抓取 {symbol} 失敗: {e}")
+        return symbol, pd.DataFrame()
+
 async def perform_scan(force_send=False):
     channel = bot.get_channel(int(CHANNEL_ID))
-    if not channel: 
-        print("找不到頻道！")
-        return
+    if not channel: return
 
     p = load_portfolio()
     msg_lines = []
     
-    # 每月自動入金
     curr_month = datetime.now().strftime("%Y-%m")
     if p.get("last_month", "") != curr_month:
         p["cash"] = p.get("cash", 0.0) + INVEST_AMOUNT
         p["last_month"] = curr_month
         msg_lines.append(f"🏦 **入金成功**：帳戶已存入 {INVEST_AMOUNT} 元。")
 
-    # 1. 識別大盤 (0050) - 加上嚴格超時控制
+    # 1. 識別大盤 (0050) - 讓它慢慢抓，不限制時間
     is_bull_market = False
-    try:
-        # 強制 5 秒內要拿到 0050 的資料
-        _, df_0050 = await asyncio.wait_for(fetch_single_stock_data("0050.TW"), timeout=5.0)
-        if not df_0050.empty:
-            is_bull_market = df_0050['Close'].iloc[-1] > df_0050['Close'].tail(60).mean()
-    except asyncio.TimeoutError:
-        print("警告: 獲取大盤(0050.TW)數據超時。")
-    except Exception as e:
-        print(f"警告: 獲取大盤數據失敗: {e}")
+    _, df_0050 = await fetch_single_stock_data("0050.TW")
+    if not df_0050.empty:
+        is_bull_market = df_0050['Close'].iloc[-1] > df_0050['Close'].tail(60).mean()
 
-    # 2. 逐檔掃描名單 (嚴格超時控制)
+    # 2. 逐檔掃描名單
     results = []
     if is_bull_market:
         for s in WATCHLIST:
-            try:
-                # 每檔股票強制 3 秒內要拿到資料
-                _, df = await asyncio.wait_for(fetch_single_stock_data(s), timeout=3.0)
-                
-                if df.empty or len(df) < 200: 
-                    continue
-                
-                close = df['Close']
-                ema200 = close.ewm(span=200, adjust=False).mean()
-                macd = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
-                sig = macd.ewm(span=9, adjust=False).mean()
-                
-                # 核心 MACD 策略判定
-                if (close.iloc[-1] > ema200.iloc[-1]) and (macd.iloc[-2] < sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1]) and (macd.iloc[-1] < 0):
-                    results.append({'symbol': s, 'price': close.iloc[-1], 'score': macd.iloc[-1] - sig.iloc[-1]})
-            except asyncio.TimeoutError:
-                print(f"警告: {s} 掃描超時跳過。")
-            except Exception as e:
-                print(f"警告: {s} 掃描錯誤: {e}")
-                
-            # 強制稍微休息，避免觸發 API 限制
+            _, df = await fetch_single_stock_data(s)
+            if df.empty or len(df) < 200: 
+                await asyncio.sleep(0.5)
+                continue
+            
+            close = df['Close']
+            ema200 = close.ewm(span=200, adjust=False).mean()
+            macd = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
+            sig = macd.ewm(span=9, adjust=False).mean()
+            
+            # 核心 MACD 策略判定
+            if (close.iloc[-1] > ema200.iloc[-1]) and (macd.iloc[-2] < sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1]) and (macd.iloc[-1] < 0):
+                results.append({'symbol': s, 'price': close.iloc[-1], 'score': macd.iloc[-1] - sig.iloc[-1]})
+            
+            # 休息一下避免被 Yahoo 擋
             await asyncio.sleep(0.5)
 
     # 3. 檢查現有持股 (移動停利)
     for sym, data_p in list(p.get("holdings", {}).items()):
-        try:
-            _, df = await asyncio.wait_for(fetch_single_stock_data(sym), timeout=3.0)
-            if df.empty: continue
+        _, df = await fetch_single_stock_data(sym)
+        if df.empty: continue
+        
+        curr_p = df['Close'].iloc[-1]
+        ema200 = df['Close'].ewm(span=200, adjust=False).mean().iloc[-1]
+        if curr_p > data_p["high_price"]: 
+            data_p["high_price"] = curr_p
             
-            curr_p = df['Close'].iloc[-1]
-            ema200 = df['Close'].ewm(span=200, adjust=False).mean().iloc[-1]
-            if curr_p > data_p["high_price"]: 
-                data_p["high_price"] = curr_p
-                
-            if curr_p < ema200 or curr_p < data_p["high_price"] * 0.85:
-                sell_val = data_p["shares"] * curr_p
-                p["cash"] += sell_val
-                name = STOCK_NAMES.get(sym, sym)
-                msg_lines.append(f"🚨 **自動平倉**：{name} 已觸發保護機制。")
-                del p["holdings"][sym]
-        except Exception as e:
-            print(f"檢查持股 {sym} 時發生錯誤: {e}")
-            continue
+        if curr_p < ema200 or curr_p < data_p["high_price"] * 0.85:
+            sell_val = data_p["shares"] * curr_p
+            p["cash"] += sell_val
+            name = STOCK_NAMES.get(sym, sym)
+            msg_lines.append(f"🚨 **自動平倉**：{name} 已觸發保護機制。")
+            del p["holdings"][sym]
 
     # 4. 執行買進
     results.sort(key=lambda x: x['score'], reverse=True)
