@@ -134,53 +134,85 @@ async def on_message(message):
 # 6. 核心分析與交易引擎
 # ==========================================
 async def process_stock_query(channel, symbol):
-    await channel.send(f"🔍 正在對 `{symbol}` 進行深度高勝率策略分析...")
+    await channel.send(f"🔍 正在對 `{symbol}` 進行深度高勝率策略分析與倉位精算...")
     try:
-        t = yf.Ticker(symbol)
-        df = t.history(period="1y") # 獲取一年數據以計算 200 EMA
+        # 1. 獲取資料 (使用我們剛剛換上的 FinMind 引擎)
+        _, df = await fetch_single_stock_data(symbol)
         if df.empty or len(df) < 200:
-            await channel.send(f"❌ `{symbol}` 數據不足（需至少 200 天）。")
+            await channel.send(f"❌ `{symbol}` 歷史數據不足（需至少 200 天）或 API 暫時無回應。")
             return
             
-        # 計算指標
+        # 2. 讀取虛擬帳本
+        p = load_portfolio()
+        cash = p.get("cash", 0.0)
+        holdings = p.get("holdings", {})
+            
+        # 3. 計算技術指標
         close = df['Close']
         ema200 = close.ewm(span=200, adjust=False).mean()
-        exp1 = close.ewm(span=12, adjust=False).mean()
-        exp2 = close.ewm(span=26, adjust=False).mean()
-        macd = exp1 - exp2
+        macd = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
         sig = macd.ewm(span=9, adjust=False).mean()
         
         curr_p = close.iloc[-1]
         curr_ema200 = ema200.iloc[-1]
         curr_macd = macd.iloc[-1]
         curr_sig = sig.iloc[-1]
-        prev_macd = macd.iloc[-2]
-        prev_sig = sig.iloc[-2]
 
-        # 策略判斷
+        # 4. 策略判斷
         trend = "上升趨勢" if curr_p > curr_ema200 else "下降趨勢"
-        is_long = (curr_p > curr_ema200) and (prev_macd < prev_sig) and (curr_macd > curr_sig) and (curr_macd < 0)
+        is_long = (curr_p > curr_ema200) and (macd.iloc[-2] < sig.iloc[-2]) and (curr_macd > curr_sig) and (curr_macd < 0)
         
+        # 5. 畫圖 (保留原本的 MACD 專業圖表)
         chart_path = generate_advanced_chart(df, symbol)
         
+        # 6. 組合報告
         msg = (
-            f"📊 **{STOCK_NAMES.get(symbol, symbol)} 策略報告**\n"
-            f"> 1. 【趨勢】：目前處於 **{trend}** (Price vs 200 EMA)\n"
+            f"📊 **{STOCK_NAMES.get(symbol, symbol)} ({symbol}) 策略與倉位報告**\n"
+            f"> 1. 【趨勢】：目前處於 **{trend}** (現價 `{curr_p:.1f}` vs 200 EMA `{curr_ema200:.1f}`)\n"
             f"> 2. 【MACD】：快線 `{curr_macd:.2f}` / 慢線 `{curr_sig:.2f}` (零軸下交叉：{'✅ 是' if curr_macd < 0 else '❌ 否'})\n"
-            f"> 3. 【行動】：🚀 **{'可以做多' if is_long else '繼續觀望'}**\n"
+            f"> 3. 【行動】：🚀 **{'強烈建議做多' if is_long else '未達嚴格進場標準，建議觀望'}**\n"
         )
         
         if is_long:
             sl = curr_ema200 * 0.98
             tp = curr_p + (curr_p - sl) * 1.5
-            msg += f"> 4. 【風險】：停損 `{sl:.1f}`，停利 `{tp:.1f}` (R/R 1:1.5)"
+            msg += f"> 4. 【風險設置】：停損防線 `{sl:.1f}`，停利目標 `{tp:.1f}` (R/R 1:1.5)\n"
 
+        # 🌟 7. 智慧倉位分析 🌟
+        msg += "\n💼 **【專屬帳戶健檢】**\n"
+        if symbol in holdings:
+            # 已經持有這檔股票
+            data_p = holdings[symbol]
+            shares = data_p["shares"]
+            avg_cost = data_p["avg_cost"]
+            profit_pct = ((curr_p - avg_cost) / avg_cost) * 100
+            
+            msg += f"> 📦 庫存狀態：目前持有 `{shares}` 股 | 平均成本 `{avg_cost:.1f}` | 帳面報酬 **`{profit_pct:.1f}%`**\n"
+            
+            # 檢查是否該賣了
+            high_p = data_p.get("high_price", curr_p)
+            if curr_p < curr_ema200 or curr_p < high_p * 0.85:
+                msg += "> 🚨 **賣出警告**：已跌破 200 EMA 或從高點回落 15%，建議**立刻平倉賣出**！\n"
+            else:
+                msg += "> 🛡️ **持股建議**：目前趨勢健康，尚未觸發停利損，建議**繼續抱牢**。\n"
+        else:
+            # 手上沒有這檔股票
+            if is_long:
+                max_shares = int(cash // curr_p)
+                if max_shares > 0:
+                    msg += f"> 💰 資金評估：目前可用現金 `{cash:.0f}` 元，以現價計算，您最多可買入 **`{max_shares}` 股**。\n"
+                else:
+                    msg += f"> ⚠️ 資金評估：目前可用現金 `{cash:.0f}` 元，餘額不足以買入 1 股。\n"
+            else:
+                 msg += "> 📭 庫存狀態：目前未持有此檔股票。\n"
+
+        # 傳送圖片與報告
         with open(chart_path, 'rb') as f:
             await channel.send(content=msg, file=discord.File(f))
-        os.remove(chart_path)
+        os.remove(chart_path) # 傳送後刪除圖片釋放空間
+        
     except Exception as e:
         await channel.send(f"❌ 查詢失敗: {e}")
-
 # ==========================================
 # 7. 全自動巡邏引擎 (包含 15% 移動停利)
 # ==========================================
