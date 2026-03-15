@@ -216,6 +216,27 @@ async def fetch_single_stock_data(symbol):
         print(f"抓取 {symbol} 失敗: {e}")
         return symbol, pd.DataFrame()
 
+async def fetch_single_stock_data(symbol, retries=2):
+    """
+    加入「重試機制」，如果第一次抓不到，等一秒再抓一次
+    """
+    loop = asyncio.get_running_loop()
+    for attempt in range(retries):
+        try:
+            df = await loop.run_in_executor(
+                None, 
+                lambda: yf.Ticker(symbol, session=session).history(period="1y")
+            )
+            # 只要有抓到資料，就立刻回傳
+            if not df.empty and len(df) > 0:
+                return symbol, df
+        except Exception as e:
+            print(f"抓取 {symbol} 失敗 (嘗試 {attempt+1}): {e}")
+        
+        await asyncio.sleep(1) # 休息 1 秒後重試
+        
+    return symbol, pd.DataFrame() # 真的抓不到才回傳空值
+
 async def perform_scan(force_send=False):
     channel = bot.get_channel(int(CHANNEL_ID))
     if not channel: return
@@ -230,25 +251,33 @@ async def perform_scan(force_send=False):
         p["last_month"] = curr_month
         msg_lines.append(f"🏦 **入金成功**：帳戶已存入 {INVEST_AMOUNT} 元，可用現金：`{p['cash']:.0f}`")
 
-    # 2. 判斷大盤 (0050)
-    _, df_0050 = await fetch_single_stock_data("0050.TW")
-    if df_0050.empty:
-        msg_lines.append("⚠️ 警告：無法取得 0050 數據，保護機制啟動，暫停買進。")
+    # 2. 判斷大盤 (雙重保險：先看大盤指數，抓不到再看 0050)
+    _, df_market = await fetch_single_stock_data("^TWII")
+    market_name = "加權指數 (^TWII)"
+    
+    if df_market.empty:
+        _, df_market = await fetch_single_stock_data("0050.TW")
+        market_name = "台灣 50 (0050)"
+
+    if df_market.empty:
+        msg_lines.append("⚠️ 警告：Yahoo API 異常，大盤與 0050 皆無法取得數據！保護機制啟動，暫停買進。")
         is_bull_market = False
     else:
-        ma60_0050 = df_0050['Close'].tail(60).mean()
-        is_bull_market = df_0050['Close'].iloc[-1] > ma60_0050
+        ma60_market = df_market['Close'].tail(60).mean()
+        is_bull_market = df_market['Close'].iloc[-1] > ma60_market
         if not is_bull_market:
-            msg_lines.append("🛑 **【大盤警報】** 台灣 50 (0050) 目前位於季線之下。策略規定：空頭市場嚴禁做多，機器人進入觀望模式！")
+            msg_lines.append(f"🛑 **【大盤警報】** {market_name} 目前位於季線之下。空頭市場嚴禁做多，維持觀望！")
 
     # 3. 如果大盤是多頭，開始掃描 50 檔
     results = []
     if is_bull_market:
-        scan_msg = await channel.send("⏳ 大盤確認偏多！正在逐檔掃描 50 檔成分股的 MACD 狀態，這大約需要 30 秒...")
+        scan_msg = await channel.send(f"✅ 大盤 ({market_name}) 確認偏多！正在逐檔掃描 50 檔成分股的 MACD 狀態，約需 30~60 秒...")
         
         for s in WATCHLIST:
             _, df = await fetch_single_stock_data(s)
-            if df.empty or len(df) < 200: continue
+            if df.empty or len(df) < 200: 
+                await asyncio.sleep(0.5)
+                continue
             
             close = df['Close']
             ema200 = close.ewm(span=200, adjust=False).mean()
@@ -258,14 +287,15 @@ async def perform_scan(force_send=False):
             # 策略：站上 200EMA + 零軸下金叉
             if (close.iloc[-1] > ema200.iloc[-1]) and (macd.iloc[-2] < sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1]) and (macd.iloc[-1] < 0):
                 results.append({'symbol': s, 'price': close.iloc[-1], 'score': macd.iloc[-1] - sig.iloc[-1]})
+            
+            await asyncio.sleep(0.5) # 乖乖排隊不塞車
         
-        # 刪除「掃描中」的提示訊息
         try:
             await scan_msg.delete()
         except: pass
 
         if not results:
-            msg_lines.append("🔎 **【掃描結果】** 巡邏了 50 檔旗艦股，目前 **沒有任何一檔** 發生「零軸下 MACD 黃金交叉」。策略嚴格執行，不胡亂追高，維持觀望！")
+            msg_lines.append("🔎 **【掃描結果】** 巡邏了 50 檔旗艦股，目前 **無任何一檔** 發生「零軸下 MACD 黃金交叉」。策略嚴格執行，不胡亂追高！")
 
     # 4. 檢查現有持股 (移動停利)
     for sym, data_p in list(p.get("holdings", {}).items()):
@@ -303,7 +333,6 @@ async def perform_scan(force_send=False):
     if force_send or msg_lines:
         final_msg = "🛰️ **【量化艦隊執行報告】**\n" + "\n".join(msg_lines)
         await channel.send(final_msg[:2000])
-
 async def show_portfolio(channel):
     p = load_portfolio()
     msg = f"💼 **帳本狀態**\n現金：`{p['cash']:.0f}` 元\n"
