@@ -223,57 +223,68 @@ async def perform_scan(force_send=False):
     p = load_portfolio()
     msg_lines = []
     
+    # 1. 處理入金
     curr_month = datetime.now().strftime("%Y-%m")
     if p.get("last_month", "") != curr_month:
         p["cash"] = p.get("cash", 0.0) + INVEST_AMOUNT
         p["last_month"] = curr_month
-        msg_lines.append(f"🏦 **入金成功**：帳戶已存入 {INVEST_AMOUNT} 元。")
+        msg_lines.append(f"🏦 **入金成功**：帳戶已存入 {INVEST_AMOUNT} 元，可用現金：`{p['cash']:.0f}`")
 
-    # 1. 識別大盤 (0050) - 讓它慢慢抓，不限制時間
-    is_bull_market = False
+    # 2. 判斷大盤 (0050)
     _, df_0050 = await fetch_single_stock_data("0050.TW")
-    if not df_0050.empty:
-        is_bull_market = df_0050['Close'].iloc[-1] > df_0050['Close'].tail(60).mean()
+    if df_0050.empty:
+        msg_lines.append("⚠️ 警告：無法取得 0050 數據，保護機制啟動，暫停買進。")
+        is_bull_market = False
+    else:
+        ma60_0050 = df_0050['Close'].tail(60).mean()
+        is_bull_market = df_0050['Close'].iloc[-1] > ma60_0050
+        if not is_bull_market:
+            msg_lines.append("🛑 **【大盤警報】** 台灣 50 (0050) 目前位於季線之下。策略規定：空頭市場嚴禁做多，機器人進入觀望模式！")
 
-    # 2. 逐檔掃描名單
+    # 3. 如果大盤是多頭，開始掃描 50 檔
     results = []
     if is_bull_market:
+        scan_msg = await channel.send("⏳ 大盤確認偏多！正在逐檔掃描 50 檔成分股的 MACD 狀態，這大約需要 30 秒...")
+        
         for s in WATCHLIST:
             _, df = await fetch_single_stock_data(s)
-            if df.empty or len(df) < 200: 
-                await asyncio.sleep(0.5)
-                continue
+            if df.empty or len(df) < 200: continue
             
             close = df['Close']
             ema200 = close.ewm(span=200, adjust=False).mean()
             macd = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
             sig = macd.ewm(span=9, adjust=False).mean()
             
-            # 核心 MACD 策略判定
+            # 策略：站上 200EMA + 零軸下金叉
             if (close.iloc[-1] > ema200.iloc[-1]) and (macd.iloc[-2] < sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1]) and (macd.iloc[-1] < 0):
                 results.append({'symbol': s, 'price': close.iloc[-1], 'score': macd.iloc[-1] - sig.iloc[-1]})
-            
-            # 休息一下避免被 Yahoo 擋
-            await asyncio.sleep(0.5)
+        
+        # 刪除「掃描中」的提示訊息
+        try:
+            await scan_msg.delete()
+        except: pass
 
-    # 3. 檢查現有持股 (移動停利)
+        if not results:
+            msg_lines.append("🔎 **【掃描結果】** 巡邏了 50 檔旗艦股，目前 **沒有任何一檔** 發生「零軸下 MACD 黃金交叉」。策略嚴格執行，不胡亂追高，維持觀望！")
+
+    # 4. 檢查現有持股 (移動停利)
     for sym, data_p in list(p.get("holdings", {}).items()):
         _, df = await fetch_single_stock_data(sym)
         if df.empty: continue
         
         curr_p = df['Close'].iloc[-1]
         ema200 = df['Close'].ewm(span=200, adjust=False).mean().iloc[-1]
-        if curr_p > data_p["high_price"]: 
-            data_p["high_price"] = curr_p
+        if curr_p > data_p["high_price"]: data_p["high_price"] = curr_p
             
         if curr_p < ema200 or curr_p < data_p["high_price"] * 0.85:
             sell_val = data_p["shares"] * curr_p
+            profit_pct = ((curr_p - data_p["avg_cost"]) / data_p["avg_cost"]) * 100
             p["cash"] += sell_val
             name = STOCK_NAMES.get(sym, sym)
-            msg_lines.append(f"🚨 **自動平倉**：{name} 已觸發保護機制。")
+            msg_lines.append(f"🚨 **自動平倉**：{name} 觸發保護機制。賣出價 `{curr_p:.1f}` (報酬率 `{profit_pct:.1f}%`)")
             del p["holdings"][sym]
 
-    # 4. 執行買進
+    # 5. 執行買進
     results.sort(key=lambda x: x['score'], reverse=True)
     if results and p.get("cash", 0) > 1000:
         targets = results[:2]
@@ -286,11 +297,11 @@ async def perform_scan(force_send=False):
                     p["cash"] -= shares * target['price']
                     if "holdings" not in p: p["holdings"] = {}
                     p["holdings"][sym] = {"shares": shares, "avg_cost": target['price'], "high_price": target['price']}
-                    msg_lines.append(f"🛒 **策略進場**：買入 {STOCK_NAMES.get(sym, sym)} `{shares}` 股。")
+                    msg_lines.append(f"🛒 **策略進場**：完美捕捉起漲點！買入 {STOCK_NAMES.get(sym, sym)} `{shares}` 股。")
 
     save_portfolio(p)
     if force_send or msg_lines:
-        final_msg = "🛰️ **【量化艦隊執行報告】**\n" + ("\n".join(msg_lines) if msg_lines else "目前大盤偏弱或無符合 MACD 買進訊號的標的，維持觀望。")
+        final_msg = "🛰️ **【量化艦隊執行報告】**\n" + "\n".join(msg_lines)
         await channel.send(final_msg[:2000])
 
 async def show_portfolio(channel):
