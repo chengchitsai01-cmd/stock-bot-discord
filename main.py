@@ -133,13 +133,20 @@ async def on_message(message):
 # ==========================================
 # 6. 核心分析與交易引擎
 # ==========================================
+import traceback # 記得在最上面加上這行 (跟 import os 放一起)
+
 async def process_stock_query(channel, symbol):
-    await channel.send(f"🔍 正在對 `{symbol}` 進行深度高勝率策略分析與倉位精算...")
+    # 發送初步確認訊息
+    initial_msg = await channel.send(f"🔍 正在對 `{symbol}` 進行深度高勝率策略分析與倉位精算...")
+    
     try:
-        # 1. 獲取資料 (使用我們剛剛換上的 FinMind 引擎)
+        # 1. 獲取資料
+        print(f"DEBUG: 準備呼叫 fetch_single_stock_data 抓取 {symbol}")
         _, df = await fetch_single_stock_data(symbol)
+        
+        print(f"DEBUG: fetch_single_stock_data 回傳結果，df 長度: {len(df)}")
         if df.empty or len(df) < 200:
-            await channel.send(f"❌ `{symbol}` 歷史數據不足（需至少 200 天）或 API 暫時無回應。")
+            await initial_msg.edit(content=f"❌ `{symbol}` 歷史數據不足（需至少 200 天，目前取得 {len(df)} 天）或 API 暫時無回應。")
             return
             
         # 2. 讀取虛擬帳本
@@ -148,6 +155,7 @@ async def process_stock_query(channel, symbol):
         holdings = p.get("holdings", {})
             
         # 3. 計算技術指標
+        print("DEBUG: 開始計算技術指標")
         close = df['Close']
         ema200 = close.ewm(span=200, adjust=False).mean()
         macd = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
@@ -162,7 +170,8 @@ async def process_stock_query(channel, symbol):
         trend = "上升趨勢" if curr_p > curr_ema200 else "下降趨勢"
         is_long = (curr_p > curr_ema200) and (macd.iloc[-2] < sig.iloc[-2]) and (curr_macd > curr_sig) and (curr_macd < 0)
         
-        # 5. 畫圖 (保留原本的 MACD 專業圖表)
+        # 5. 畫圖 
+        print("DEBUG: 開始畫圖")
         chart_path = generate_advanced_chart(df, symbol)
         
         # 6. 組合報告
@@ -178,10 +187,9 @@ async def process_stock_query(channel, symbol):
             tp = curr_p + (curr_p - sl) * 1.5
             msg += f"> 4. 【風險設置】：停損防線 `{sl:.1f}`，停利目標 `{tp:.1f}` (R/R 1:1.5)\n"
 
-        # 🌟 7. 智慧倉位分析 🌟
+        # 7. 智慧倉位分析 
         msg += "\n💼 **【專屬帳戶健檢】**\n"
         if symbol in holdings:
-            # 已經持有這檔股票
             data_p = holdings[symbol]
             shares = data_p["shares"]
             avg_cost = data_p["avg_cost"]
@@ -189,14 +197,12 @@ async def process_stock_query(channel, symbol):
             
             msg += f"> 📦 庫存狀態：目前持有 `{shares}` 股 | 平均成本 `{avg_cost:.1f}` | 帳面報酬 **`{profit_pct:.1f}%`**\n"
             
-            # 檢查是否該賣了
             high_p = data_p.get("high_price", curr_p)
             if curr_p < curr_ema200 or curr_p < high_p * 0.85:
                 msg += "> 🚨 **賣出警告**：已跌破 200 EMA 或從高點回落 15%，建議**立刻平倉賣出**！\n"
             else:
                 msg += "> 🛡️ **持股建議**：目前趨勢健康，尚未觸發停利損，建議**繼續抱牢**。\n"
         else:
-            # 手上沒有這檔股票
             if is_long:
                 max_shares = int(cash // curr_p)
                 if max_shares > 0:
@@ -206,13 +212,17 @@ async def process_stock_query(channel, symbol):
             else:
                  msg += "> 📭 庫存狀態：目前未持有此檔股票。\n"
 
-        # 傳送圖片與報告
+        # 傳送圖片與報告 (先刪除一開始的等待訊息)
+        await initial_msg.delete()
         with open(chart_path, 'rb') as f:
             await channel.send(content=msg, file=discord.File(f))
-        os.remove(chart_path) # 傳送後刪除圖片釋放空間
+        os.remove(chart_path)
         
     except Exception as e:
-        await channel.send(f"❌ 查詢失敗: {e}")
+        # 如果發生任何錯誤，把錯誤的詳細原因 (Traceback) 傳到頻道裡
+        error_msg = traceback.format_exc()
+        await initial_msg.edit(content=f"❌ 系統發生嚴重錯誤！\n```python\n{error_msg}\n```")
+        print(f"ERROR in process_stock_query:\n{error_msg}")
 # ==========================================
 # 7. 全自動巡邏引擎 (包含 15% 移動停利)
 # ==========================================
