@@ -1,35 +1,33 @@
-name: Stock Bot Runner
+name: Quant Bot 4.0 Daily Scan
 
 on:
   schedule:
-    # 台灣開盤時間 09:10 到 13:40，每 30 分鐘巡邏一次 (週一至週五)
-    # (GitHub 伺服器使用 UTC 時間，所以 1-5 代表台灣的 09-13 點)
-    - cron: '10/30 1-5 * * 1-5'
-  workflow_dispatch: # 保留手動執行按鈕，讓你可以隨時在網頁上點擊測試
+    # 台灣時間週一至週五 09:30 執行一次 (UTC 01:30)
+    - cron: '30 1 * * 1-5'
+  workflow_dispatch: # 保留手動測試按鈕
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      - name: 檢出專案代碼
+      - name: Checkout code
         uses: actions/checkout@v3
 
-      - name: 設定 Python 環境
+      - name: Set up Python
         uses: actions/setup-python@v4
         with:
           python-version: '3.9'
 
-      - name: 安裝必要套件
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install discord.py yfinance pandas
+          pip install discord.py yfinance pandas matplotlib Flask
 
-      - name: 執行量化程式
+      - name: Run Quant Strategy
         env:
-          # 從 GitHub Secrets 安全讀取你的密碼
           DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
           CHANNEL_ID: ${{ secrets.CHANNEL_ID }}
-          # 🌟 關鍵開關：告訴程式現在是排程模式，做完健檢就關機睡覺
+          # 🌟 關鍵：告訴程式現在是排程模式，跑完就關機
           RUN_MODE: github_cron
         run: python main.py
