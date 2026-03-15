@@ -14,12 +14,13 @@ CHANNEL_ID = os.environ.get("CHANNEL_ID")
 INVEST_AMOUNT = 5000  
 RUN_MODE = os.environ.get("RUN_MODE", "listen") 
 
+# 開啟機器人的意圖 (Intents)，允許它讀取訊息內容
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # ==========================================
-# 2. 核心 15 勇士觀察名單
+# 2. 核心 15 勇士觀察名單與字典
 # ==========================================
 STOCK_NAMES = {
     "2330.TW": "台積電", "2317.TW": "鴻海", "2454.TW": "聯發科", "2308.TW": "台達電",
@@ -32,6 +33,7 @@ WATCHLIST = list(STOCK_NAMES.keys())
 # 建立反向字典，讓機器人可以聽懂「台積電」並轉成「2330.TW」
 REVERSE_STOCK_NAMES = {v: k for k, v in STOCK_NAMES.items()}
 
+# --- 狀態記憶功能 ---
 def get_last_state():
     if os.path.exists("last_state.txt"):
         try:
@@ -66,7 +68,7 @@ async def process_stock_query(channel, symbol):
             f"📊 **{name} ({symbol}) 量化健檢報告**\n"
             f"> 💰 目前股價：`{last_p:.2f}`\n"
             f"> 📏 60日季線：`{ma60:.2f}`\n"
-            f"> 🚀 動能分數：`{mom20:.2f}` (近20日漲幅)\n"
+            f"> 🚀 動能分數：`{mom20:.2f}` (近20日漲跌幅)\n"
             f"> 🛡️ 趨勢判定：**{status}**\n"
             f"---"
         )
@@ -80,13 +82,17 @@ async def process_stock_query(channel, symbol):
             
         await channel.send(msg)
     except Exception as e:
+        print(f"查詢發生錯誤: {e}")
         await channel.send("❌ 查詢失敗，可能是 Yahoo Finance 阻擋了請求。")
 
 # ==========================================
-# 4. 全頻道智慧監聽 (取代原本的 !查詢)
+# 4. 全頻道智慧監聽 (無指令觸發) + 聽診器除錯
 # ==========================================
 @bot.event
 async def on_message(message):
+    # 🎧 聽診器：只要頻道有人講話，就在你的黑色終端機畫面印出來
+    print(f"💬 [測試] 聽到 {message.author} 說了：{message.content}")
+
     # 避免機器人自己回自己，造成無限迴圈
     if message.author == bot.user:
         return
@@ -96,13 +102,10 @@ async def on_message(message):
     target_symbol = None
 
     # 智慧判斷邏輯：
-    # 1. 如果輸入的是我們名單上的中文 (例如: "長榮")
     if content in REVERSE_STOCK_NAMES:
         target_symbol = REVERSE_STOCK_NAMES[content]
-    # 2. 如果輸入的是剛好 4 個數字 (例如: "2603")
     elif content.isdigit() and len(content) == 4:
         target_symbol = content + ".TW"
-    # 3. 如果輸入的是帶有 .TW 的代碼 (例如: "2603.TW")
     elif content.endswith(".TW") and content[:-3].isdigit() and len(content[:-3]) == 4:
         target_symbol = content
 
@@ -110,7 +113,7 @@ async def on_message(message):
     if target_symbol:
         await process_stock_query(message.channel, target_symbol)
 
-    # 讓 bot 繼續處理其他可能的潛在指令
+    # 讓 bot 繼續處理其他可能的潛在預設指令
     await bot.process_commands(message)
 
 # ==========================================
@@ -118,7 +121,9 @@ async def on_message(message):
 # ==========================================
 async def perform_scan():
     channel = bot.get_channel(int(CHANNEL_ID))
-    if not channel: return
+    if not channel: 
+        print("找不到頻道！請確認 CHANNEL_ID 是否正確。")
+        return
 
     try:
         df_0050 = yf.Ticker("0050.TW").history(period="100d")
@@ -180,12 +185,15 @@ async def on_ready():
     print(f"🤖 量化主機已連線！當前執行模式：{RUN_MODE}")
     
     if RUN_MODE == "github_cron":
+        print("⏳ 開始執行 GitHub 排程掃描...")
         await perform_scan()
+        print("✅ 掃描完成，準備關閉連線...")
         await bot.close()
     else:
         channel = bot.get_channel(int(CHANNEL_ID))
         if channel:
-            await channel.send("🟢 **量化主機已在本機端連線！您可以直接在對話框輸入「代碼 (如 2330)」或「名稱 (如 廣達)」來查詢。**")
+            print("🟢 進入常駐監聽模式，等待指令...")
+            await channel.send("🟢 **量化主機已連線！您可以直接在對話框輸入「代碼 (如 2330)」或「名稱 (如 廣達)」來查詢。**")
 
 if __name__ == "__main__":
     bot.run(DISCORD_BOT_TOKEN)
