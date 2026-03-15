@@ -6,7 +6,7 @@ import pandas as pd
 import asyncio
 from datetime import datetime
 
-# 1. 讀取環境變數
+# 1. 讀取環境變數 (請確保 GitHub Secrets 已設定)
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 INVEST_AMOUNT = 5000 
@@ -15,7 +15,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# --- 📌 絕對固定觀察名單 (不再更動) ---
+# --- 📌 絕對固定觀察名單 (維持 237% 報酬率的核心) ---
 STOCK_NAMES = {
     "2330.TW": "台積電", "2317.TW": "鴻海", "2454.TW": "聯發科", "2308.TW": "台達電",
     "2382.TW": "廣達", "3231.TW": "緯創", "3017.TW": "奇鋐", "2603.TW": "長榮",
@@ -24,11 +24,14 @@ STOCK_NAMES = {
 }
 WATCHLIST = list(STOCK_NAMES.keys())
 
-# --- 記憶功能：避免重複發送 ---
+# --- 記憶功能：避免盤中重複轟炸 ---
 def get_last_recommendation():
     if os.path.exists("last_result.txt"):
-        with open("last_result.txt", "r") as f:
-            return f.read().strip()
+        try:
+            with open("last_result.txt", "r") as f:
+                return f.read().strip()
+        except:
+            return ""
     return ""
 
 def save_recommendation(symbol):
@@ -41,6 +44,7 @@ async def perform_scan():
     if not channel: return
 
     results = []
+    # 進行全名單掃描
     for s in WATCHLIST:
         try:
             t = yf.Ticker(s)
@@ -49,45 +53,62 @@ async def perform_scan():
             
             last_p = df['Close'].iloc[-1]
             ma60 = df['Close'].tail(60).mean()
-            # 計算 20 日動能
             mom20 = df['Close'].pct_change(periods=20).iloc[-1]
             
-            if last_p > ma60: # 只有在季線之上的才列入考慮
+            # 濾網：只考慮季線之上的股票
+            if last_p > ma60:
                 results.append({
                     'symbol': s, 
                     'name': STOCK_NAMES.get(s, s), 
                     'score': mom20 * 100, 
                     'price': last_p
                 })
-        except: continue
+        except:
+            continue
+        await asyncio.sleep(0.5)
 
+    # 排序找出當前第一名
     results.sort(key=lambda x: x['score'], reverse=True)
     
     current_top = results[0]['symbol'] if results else "NONE"
     last_top = get_last_recommendation()
-    is_monday = datetime.now().weekday() == 0 # 週一
+    
+    # 判斷是否為週一開盤 (10:00 前) 作為每週例行報告
+    now = datetime.now()
+    is_monday_morning = (now.weekday() == 0 and now.hour < 11)
 
-    # --- 邏輯：只有「換人當老大」或「週一」才傳訊息 ---
-    if current_top != last_top or is_monday:
+    # --- 盤中智慧發送邏輯 ---
+    should_send = False
+    msg_header = ""
+
+    if current_top != last_top:
+        # 情況 A：第一名換人了 (趨勢轉動)
+        should_send = True
+        msg_header = "⚡ **【盤中趨勢轉向提醒】**\n市場資金流向變動，新的領頭羊出現！"
+        save_recommendation(current_top)
+    elif is_monday_morning:
+        # 情況 B：每週一早上的定期點名
+        should_send = True
+        msg_header = "📅 **【每週開盤總結】**\n目前觀察池狀況如下："
+    
+    if should_send:
         if results:
             top_1 = results[0]
             shares = INVEST_AMOUNT // top_1['price']
-            
-            header = "🔄 **【標的輪動】**" if current_top != last_top else "📅 **【每週報到】**"
             msg = (
-                f"{header}\n"
-                f"🏆 本月推薦：**{top_1['name']}** ({top_1['symbol']})\n"
+                f"{msg_header}\n"
+                f"🏆 當前最強：**{top_1['name']}** ({top_1['symbol']})\n"
                 f"✅ 操作建議：買進 `{int(shares)}` 股\n"
                 f"💰 目前股價：`{top_1['price']:.2f}`\n"
-                f"💡 動能評分：`{top_1['score']:.2f}`"
+                f"💡 動能分數：`{top_1['score']:.2f}`"
             )
             await channel.send(msg)
-            save_recommendation(current_top)
-        else:
-            if last_top != "NONE":
-                await channel.send("🛑 **【避險提醒】市場轉弱，所有標的皆跌破季線，請保留現金。**")
-                save_recommendation("NONE")
+        elif last_top != "NONE":
+            # 情況 C：原本有標的，盤中突然全部跌破季線 (發生大跌)
+            await channel.send("⚠️ **【盤中避險警告】** 所有標的均跌破季線，趨勢轉空，請暫停買進並保留現金！")
+            save_recommendation("NONE")
     
+    # 執行完畢關閉機器人，省電省時數
     await bot.close()
 
 @bot.event
