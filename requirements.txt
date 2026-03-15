@@ -1,5 +1,5 @@
 discord.py
-yfinance
 pandas
 matplotlib
 Flask
+requests
