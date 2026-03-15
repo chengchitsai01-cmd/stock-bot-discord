@@ -191,32 +191,56 @@ async def perform_scan(force_send=False):
     p = load_portfolio()
     msg_lines = []
     
-    # 每月自動入金邏輯維持不變
+    # 每月自動入金
     curr_month = datetime.now().strftime("%Y-%m")
     if p["last_month"] != curr_month:
         p["cash"] += INVEST_AMOUNT
         p["last_month"] = curr_month
         msg_lines.append(f"🏦 **入金成功**：帳戶已存入 {INVEST_AMOUNT} 元。")
 
-    # 🌟 優化點 1：一次性下載所有 50 檔股票數據 (1y 以計算 200 EMA)
-    # 這樣可以減少 90% 的網路連線等待時間
+    # 1. 識別大盤 (0050)
     try:
-        data = yf.download(WATCHLIST + ["0050.TW"], period="1y", group_by='ticker', progress=False)
-    except Exception as e:
-        await channel.send(f"❌ 批次下載數據失敗: {e}")
-        return
+        df_0050 = yf.download("0050.TW", period="1y", progress=False)
+        is_bull_market = df_0050['Close'].iloc[-1] > df_0050['Close'].tail(60).mean()
+    except:
+        is_bull_market = False 
 
-    # 辨識大盤 (0050)
-    df_0050 = data["0050.TW"]
-    is_bull_market = df_0050['Close'].iloc[-1] > df_0050['Close'].tail(60).mean()
+    # 2. 分批掃描名單 (5 檔一組，防卡死)
+    results = []
+    if is_bull_market:
+        chunk_size = 5
+        for i in range(0, len(WATCHLIST), chunk_size):
+            chunk = WATCHLIST[i:i+chunk_size]
+            print(f"DEBUG: 正在掃描第 {i} 檔到 {i+chunk_size} 檔...") # 這會印在你的 Render 日誌裡
+            try:
+                # 每次只下載 5 檔
+                data = yf.download(chunk, period="1y", group_by='ticker', progress=False, timeout=10)
+                for s in chunk:
+                    try:
+                        df = data[s].dropna()
+                        if len(df) < 200: continue
+                        
+                        close = df['Close']
+                        ema200 = close.ewm(span=200, adjust=False).mean()
+                        macd = close.ewm(span=12).mean() - close.ewm(span=26).mean()
+                        sig = macd.ewm(span=9).mean()
+                        
+                        # 核心 MACD 策略判定
+                        if (close.iloc[-1] > ema200.iloc[-1]) and (macd.iloc[-2] < sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1]) and (macd.iloc[-1] < 0):
+                            results.append({'symbol': s, 'price': close.iloc[-1], 'score': macd.iloc[-1] - sig.iloc[-1]})
+                    except: continue
+            except Exception as e:
+                print(f"警告: 下載 {chunk} 時發生錯誤: {e}")
+            
+            # 每組抓完休息 1 秒，確保不卡死
+            await asyncio.sleep(1)
 
-    # 1. 檢查現有持股 (移動停利)
+    # 3. 檢查現有持股 (移動停利)
     for sym, data_p in list(p["holdings"].items()):
         try:
-            df = data[sym]
+            df = yf.download(sym, period="1y", progress=False, timeout=10)
             curr_p = df['Close'].iloc[-1]
             ema200 = df['Close'].ewm(span=200, adjust=False).mean().iloc[-1]
-            
             if curr_p > data_p["high_price"]: data_p["high_price"] = curr_p
             if curr_p < ema200 or curr_p < data_p["high_price"] * 0.85:
                 sell_val = data_p["shares"] * curr_p
@@ -225,25 +249,7 @@ async def perform_scan(force_send=False):
                 del p["holdings"][sym]
         except: continue
 
-    # 2. 尋找符合策略的標的 (直接從已下載的快取中計算，不需重複連線)
-    results = []
-    if is_bull_market:
-        for s in WATCHLIST:
-            try:
-                df = data[s].dropna()
-                if len(df) < 200: continue
-                
-                close = df['Close']
-                ema200 = close.ewm(span=200, adjust=False).mean()
-                macd = close.ewm(span=12).mean() - close.ewm(span=26).mean()
-                sig = macd.ewm(span=9).mean()
-                
-                # 判定：站上 200 EMA + 零軸下金叉
-                if (close.iloc[-1] > ema200.iloc[-1]) and (macd.iloc[-2] < sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1]) and (macd.iloc[-1] < 0):
-                    results.append({'symbol': s, 'price': close.iloc[-1], 'score': macd.iloc[-1] - sig.iloc[-1]})
-            except: continue
-
-    # 3. 執行買進 (選分數最高的前兩名)
+    # 4. 執行買進
     results.sort(key=lambda x: x['score'], reverse=True)
     if results and p["cash"] > 1000:
         targets = results[:2]
@@ -259,24 +265,8 @@ async def perform_scan(force_send=False):
 
     save_portfolio(p)
     if force_send or msg_lines:
-        # 確保訊息不會因為太長被 Discord 切斷
-        final_msg = "🛰️ **【量化艦隊執行報告】**\n" + "\n".join(msg_lines)
+        final_msg = "🛰️ **【量化艦隊執行報告】**\n" + ("\n".join(msg_lines) if msg_lines else "大盤與個股目前無變動。")
         await channel.send(final_msg[:2000])
-    # 3. 執行買進
-    if results and p["cash"] > 1000:
-        budget = p["cash"] / len(results[:2])
-        for target in results[:2]:
-            sym = target['symbol']
-            if sym not in p["holdings"]:
-                shares = int(budget // target['price'])
-                if shares > 0:
-                    p["cash"] -= shares * target['price']
-                    p["holdings"][sym] = {"shares": shares, "avg_cost": target['price'], "high_price": target['price']}
-                    msg_lines.append(f"🛒 **策略進場**：買入 {STOCK_NAMES.get(sym, sym)} `{shares}` 股。")
-
-    save_portfolio(p)
-    if force_send or msg_lines:
-        await channel.send("🛰️ **【量化艦隊執行報告】**\n" + "\n".join(msg_lines))
 
 async def show_portfolio(channel):
     p = load_portfolio()
