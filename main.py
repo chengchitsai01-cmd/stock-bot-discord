@@ -12,13 +12,15 @@ from datetime import datetime
 DISCORD_BOT_TOKEN = os.environ.get("DISCORD_BOT_TOKEN")
 CHANNEL_ID = os.environ.get("CHANNEL_ID")
 INVEST_AMOUNT = 5000  # 每月總預算
+# 執行模式：github_cron (定時執行後關機) 或 listen (常駐監聽指令)
+RUN_MODE = os.environ.get("RUN_MODE", "listen") 
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # ==========================================
-# 2. 核心 15 勇士觀察名單 (嚴選台股各產業龍頭)
+# 2. 核心 15 勇士觀察名單
 # ==========================================
 STOCK_NAMES = {
     "2330.TW": "台積電", "2317.TW": "鴻海", "2454.TW": "聯發科", "2308.TW": "台達電",
@@ -28,121 +30,138 @@ STOCK_NAMES = {
 }
 WATCHLIST = list(STOCK_NAMES.keys())
 
-# ==========================================
-# 3. 記憶狀態管理 (避免盤中重複轟炸)
-# ==========================================
+# --- 狀態記憶功能 ---
 def get_last_state():
     if os.path.exists("last_state.txt"):
         try:
-            with open("last_state.txt", "r") as f:
-                return f.read().strip()
+            with open("last_state.txt", "r") as f: return f.read().strip()
         except: return ""
     return ""
 
 def save_state(state_str):
-    with open("last_state.txt", "w") as f:
-        f.write(state_str)
+    with open("last_state.txt", "w") as f: f.write(state_str)
 
 # ==========================================
-# 4. 核心量化引擎
+# 3. 手動查詢機制 (指令：!查詢 代碼)
+# ==========================================
+@bot.command(name="查詢")
+async def query_stock(ctx, symbol: str):
+    await ctx.send(f"🔍 啟動量化雷達，正在計算 `{symbol}` 的動能與趨勢...")
+    try:
+        # 自動防呆：如果使用者只輸入 2330，自動補上 .TW
+        if not symbol.endswith(".TW") and symbol.isdigit():
+            symbol += ".TW"
+            
+        t = yf.Ticker(symbol)
+        df = t.history(period="100d")
+        
+        if df.empty or len(df) < 65:
+            await ctx.send(f"❌ 找不到 `{symbol}` 的有效數據，請確認代碼是否正確。")
+            return
+            
+        last_p = df['Close'].iloc[-1]
+        ma60 = df['Close'].tail(60).mean()
+        # 動能分數：近 20 日漲幅百分比
+        mom20 = df['Close'].pct_change(periods=20).iloc[-1] * 100
+        
+        name = STOCK_NAMES.get(symbol, t.info.get('shortName', symbol))
+        status = "🟢 強勢 (季線之上)" if last_p > ma60 else "🔴 弱勢 (跌破季線)"
+        
+        msg = (
+            f"📊 **{name} ({symbol}) 量化健檢報告**\n"
+            f"> 💰 目前股價：`{last_p:.2f}`\n"
+            f"> 📏 60日季線：`{ma60:.2f}`\n"
+            f"> 🚀 動能分數：`{mom20:.2f}` (近20日漲跌幅)\n"
+            f"> 🛡️ 趨勢判定：**{status}**\n"
+            f"---"
+        )
+        
+        if last_p > ma60 and mom20 > 5:
+            msg += "\n✅ **診斷：趨勢向上且動能強勁，為標準多頭攻擊型態。**"
+        elif last_p > ma60 and mom20 <= 5:
+            msg += "\n⚠️ **診斷：趨勢雖在季線之上，但近期動能溫吞，處於盤整。**"
+        else:
+            msg += "\n🛑 **診斷：已跌破季線，趨勢轉空，強烈建議避開或停損！**"
+            
+        await ctx.send(msg)
+    except Exception as e:
+        await ctx.send("❌ 查詢失敗，可能是 Yahoo Finance 阻擋了請求或代碼錯誤。")
+
+# ==========================================
+# 4. 核心量化引擎 (定時大盤與名單掃描)
 # ==========================================
 async def perform_scan():
-    await bot.wait_until_ready()
     channel = bot.get_channel(int(CHANNEL_ID))
     if not channel: return
 
-    # 【防線一：大盤狀態辨識 (Market Regime)】
+    # 【大盤濾網】
     try:
-        t_0050 = yf.Ticker("0050.TW")
-        df_0050 = t_0050.history(period="100d")
-        market_price = df_0050['Close'].iloc[-1]
-        market_ma60 = df_0050['Close'].tail(60).mean()
-        is_bull_market = market_price > market_ma60
-    except:
-        # 如果抓不到大盤，為了安全起見預設為危險狀態
-        is_bull_market = False 
+        df_0050 = yf.Ticker("0050.TW").history(period="100d")
+        is_bull_market = df_0050['Close'].iloc[-1] > df_0050['Close'].tail(60).mean()
+    except: is_bull_market = False 
 
     current_state_signature = ""
     msg_lines = []
 
     if not is_bull_market:
-        # ⛈️ 空頭雨天模式：大盤跌破季線，強制空手
         current_state_signature = "BEAR_CASH"
-        msg_lines.append("🛑 **【大盤警報：空頭避險模式】**")
-        msg_lines.append("台灣 50 (0050) 已跌破 60 日季線，系統判定整體市場風險過高。")
-        msg_lines.append("✅ **操作指令：全面停止買進，請緊抱現金，等待市場落底！**")
+        msg_lines.append("🛑 **【大盤警報：空頭避險模式】**\n台灣 50 (0050) 跌破季線，系統判定風險過高。\n✅ **操作指令：全面停止買進，請緊抱現金！**")
     else:
-        # 🌞 多頭晴天模式：掃描個股動能
         results = []
         for s in WATCHLIST:
             try:
-                t = yf.Ticker(s)
-                df = t.history(period="100d")
+                df = yf.Ticker(s).history(period="100d")
                 if df.empty or len(df) < 65: continue
-                
                 last_p = df['Close'].iloc[-1]
-                ma60 = df['Close'].tail(60).mean()
-                mom20 = df['Close'].pct_change(periods=20).iloc[-1] * 100
                 
-                # 【防線二：個股必須在季線之上】
-                if last_p > ma60:
-                    results.append({
-                        'symbol': s, 'name': STOCK_NAMES.get(s, s), 
-                        'price': last_p, 'score': mom20
-                    })
+                # 【個股季線濾網】
+                if last_p > df['Close'].tail(60).mean():
+                    mom20 = df['Close'].pct_change(periods=20).iloc[-1] * 100
+                    results.append({'symbol': s, 'name': STOCK_NAMES.get(s, s), 'price': last_p, 'score': mom20})
             except: continue
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.5) # 避免 API 抓太快被鎖
 
-        # 依照 20 日動能排序 (強者恆強)
+        # 依照動能分數排序
         results.sort(key=lambda x: x['score'], reverse=True)
 
         if len(results) >= 2:
-            # 【防線三：投資組合分散 (買前兩名)】
             top_2 = results[:2]
-            budget_per_stock = INVEST_AMOUNT // 2
             current_state_signature = f"BULL_{top_2[0]['symbol']}_{top_2[1]['symbol']}"
-            
-            msg_lines.append("🌞 **【市場狀態：多頭晴天】大盤站上季線，允許攻擊！**")
-            msg_lines.append(f"🎯 **本期動能最強雙箭頭 (總預算 {INVEST_AMOUNT} 元)：**")
+            msg_lines.append(f"🌞 **【多頭晴天】大盤站上季線，本期動能雙箭頭 (總預算 {INVEST_AMOUNT} 元)：**")
             
             for i, stock in enumerate(top_2, 1):
-                shares = budget_per_stock // stock['price']
+                shares = (INVEST_AMOUNT // 2) // stock['price']
                 msg_lines.append(f"{i}. **{stock['name']}** ({stock['symbol']})")
-                msg_lines.append(f"   └ 建議買進：`{int(shares)}` 股 | 動能分數: `{stock['score']:.1f}` | 現價: `{stock['price']:.2f}`")
-        elif len(results) == 1:
-            # 只有一檔符合條件
-            top_1 = results[0]
-            shares = INVEST_AMOUNT // top_1['price']
-            current_state_signature = f"BULL_{top_1['symbol']}_ONLY"
-            msg_lines.append("⚠️ **【市場警報：結構偏弱】** 僅剩一檔標的維持在季線之上。")
-            msg_lines.append(f"🎯 建議將全額預算投入：**{top_1['name']}**，買進 `{int(shares)}` 股。")
+                msg_lines.append(f"   └ 買進 `{int(shares)}` 股 | 動能分數: `{stock['score']:.1f}` | 現價: `{stock['price']:.2f}`")
         else:
-            # 大盤在季線上，但 15 檔龍頭全破季線 (罕見背離現象)
-            current_state_signature = "BULL_DIVERGENCE_CASH"
-            msg_lines.append("⚠️ **【市場背離警報】** 大盤雖強，但核心觀察名單全數轉弱跌破季線。")
-            msg_lines.append("✅ **操作指令：假突破機率高，本月暫停買進，保留現金！**")
+            current_state_signature = "BULL_WEAK"
+            msg_lines.append("⚠️ **【市場警報：結構偏弱】**\n符合強勢條件的標的不足，假突破機率高，建議本期保留現金觀望。")
 
-    # ==========================================
-    # 5. 智慧發送邏輯 (結合排程)
-    # ==========================================
+    # 狀態比對與發送
     last_state = get_last_state()
-    now = datetime.now()
-    # 判斷是否為每週一早上 10 點前 (例行公事)
-    is_monday_morning = (now.weekday() == 0 and now.hour < 10)
+    is_monday_morning = (datetime.now().weekday() == 0 and datetime.now().hour < 11)
 
-    # 只有狀態改變，或者是週一早上，才發送 Discord 訊息
     if current_state_signature != last_state or is_monday_morning:
         header = "🔄 **【策略組合變更通知】**\n" if current_state_signature != last_state else "📅 **【每週量化巡邏報告】**\n"
-        final_msg = header + "\n".join(msg_lines)
-        await channel.send(final_msg)
+        await channel.send(header + "\n".join(msg_lines))
         save_state(current_state_signature)
 
-    await bot.close()
-
+# ==========================================
+# 5. 啟動與模式控制
+# ==========================================
 @bot.event
 async def on_ready():
-    print("🤖 系統啟動，準備執行量化掃描...")
-    await perform_scan()
+    print(f"🤖 量化主機已連線！當前執行模式：{RUN_MODE}")
+    
+    if RUN_MODE == "github_cron":
+        # GitHub 排程模式：執行完掃描後立刻關機，保護免費額度
+        await perform_scan()
+        await bot.close()
+    else:
+        # 常駐監聽模式 (本機執行)：發送上線通知，並持續等待 !查詢 指令
+        channel = bot.get_channel(int(CHANNEL_ID))
+        if channel:
+            await channel.send("🟢 **量化主機已在本機端連線！您可以隨時輸入 `!查詢 股票代號` (例如 `!查詢 2382`) 進行即時健檢。**")
 
 if __name__ == "__main__":
     bot.run(DISCORD_BOT_TOKEN)
