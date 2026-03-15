@@ -1,4 +1,4 @@
 discord.py
 yfinance
-google-genai
-flask
+pandas
+matplotlib
