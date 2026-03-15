@@ -191,46 +191,77 @@ async def perform_scan(force_send=False):
     p = load_portfolio()
     msg_lines = []
     
-    # 每月自動入金
+    # 每月自動入金邏輯維持不變
     curr_month = datetime.now().strftime("%Y-%m")
     if p["last_month"] != curr_month:
         p["cash"] += INVEST_AMOUNT
         p["last_month"] = curr_month
         msg_lines.append(f"🏦 **入金成功**：帳戶已存入 {INVEST_AMOUNT} 元。")
 
+    # 🌟 優化點 1：一次性下載所有 50 檔股票數據 (1y 以計算 200 EMA)
+    # 這樣可以減少 90% 的網路連線等待時間
+    try:
+        data = yf.download(WATCHLIST + ["0050.TW"], period="1y", group_by='ticker', progress=False)
+    except Exception as e:
+        await channel.send(f"❌ 批次下載數據失敗: {e}")
+        return
+
+    # 辨識大盤 (0050)
+    df_0050 = data["0050.TW"]
+    is_bull_market = df_0050['Close'].iloc[-1] > df_0050['Close'].tail(60).mean()
+
     # 1. 檢查現有持股 (移動停利)
-    for sym, data in list(p["holdings"].items()):
-        df = yf.Ticker(sym).history(period="1y")
-        curr_p = df['Close'].iloc[-1]
-        ema200 = df['Close'].ewm(span=200, adjust=False).mean().iloc[-1]
-        
-        if curr_p > data["high_price"]: data["high_price"] = curr_p
-        
-        # 停損：跌破 200 EMA 或從高點回落 15%
-        if curr_p < ema200 or curr_p < data["high_price"] * 0.85:
-            sell_val = data["shares"] * curr_p
-            p["cash"] += sell_val
-            msg_lines.append(f"🚨 **自動平倉**：{STOCK_NAMES.get(sym, sym)} 已觸發保護機制，以 `{curr_p:.1f}` 結清。")
-            del p["holdings"][sym]
-
-    # 2. 尋找符合 MACD + 200 EMA 策略的標的
-    results = []
-    for s in WATCHLIST:
+    for sym, data_p in list(p["holdings"].items()):
         try:
-            df = yf.Ticker(s).history(period="1y")
-            if len(df) < 200: continue
+            df = data[sym]
+            curr_p = df['Close'].iloc[-1]
+            ema200 = df['Close'].ewm(span=200, adjust=False).mean().iloc[-1]
             
-            close = df['Close']
-            ema200 = close.ewm(span=200, adjust=False).mean()
-            macd = close.ewm(span=12).mean() - close.ewm(span=26).mean()
-            sig = macd.ewm(span=9).mean()
-            
-            # 做多訊號：站上 200 EMA + 零軸下金叉
-            if (close.iloc[-1] > ema200.iloc[-1]) and (macd.iloc[-2] < sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1]) and (macd.iloc[-1] < 0):
-                results.append({'symbol': s, 'price': close.iloc[-1]})
+            if curr_p > data_p["high_price"]: data_p["high_price"] = curr_p
+            if curr_p < ema200 or curr_p < data_p["high_price"] * 0.85:
+                sell_val = data_p["shares"] * curr_p
+                p["cash"] += sell_val
+                msg_lines.append(f"🚨 **自動平倉**：{STOCK_NAMES.get(sym, sym)} 已觸發保護機制。")
+                del p["holdings"][sym]
         except: continue
-        await asyncio.sleep(0.3)
 
+    # 2. 尋找符合策略的標的 (直接從已下載的快取中計算，不需重複連線)
+    results = []
+    if is_bull_market:
+        for s in WATCHLIST:
+            try:
+                df = data[s].dropna()
+                if len(df) < 200: continue
+                
+                close = df['Close']
+                ema200 = close.ewm(span=200, adjust=False).mean()
+                macd = close.ewm(span=12).mean() - close.ewm(span=26).mean()
+                sig = macd.ewm(span=9).mean()
+                
+                # 判定：站上 200 EMA + 零軸下金叉
+                if (close.iloc[-1] > ema200.iloc[-1]) and (macd.iloc[-2] < sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1]) and (macd.iloc[-1] < 0):
+                    results.append({'symbol': s, 'price': close.iloc[-1], 'score': macd.iloc[-1] - sig.iloc[-1]})
+            except: continue
+
+    # 3. 執行買進 (選分數最高的前兩名)
+    results.sort(key=lambda x: x['score'], reverse=True)
+    if results and p["cash"] > 1000:
+        targets = results[:2]
+        budget = p["cash"] / len(targets)
+        for target in targets:
+            sym = target['symbol']
+            if sym not in p["holdings"]:
+                shares = int(budget // target['price'])
+                if shares > 0:
+                    p["cash"] -= shares * target['price']
+                    p["holdings"][sym] = {"shares": shares, "avg_cost": target['price'], "high_price": target['price']}
+                    msg_lines.append(f"🛒 **策略進場**：買入 {STOCK_NAMES.get(sym, sym)} `{shares}` 股。")
+
+    save_portfolio(p)
+    if force_send or msg_lines:
+        # 確保訊息不會因為太長被 Discord 切斷
+        final_msg = "🛰️ **【量化艦隊執行報告】**\n" + "\n".join(msg_lines)
+        await channel.send(final_msg[:2000])
     # 3. 執行買進
     if results and p["cash"] > 1000:
         budget = p["cash"] / len(results[:2])
