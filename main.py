@@ -1,21 +1,21 @@
 import os
 import discord
 from discord.ext import commands
-import yfinance as yf
 import pandas as pd
 import asyncio
 import json
-from datetime import datetime
+import requests
+from datetime import datetime, timedelta
 import matplotlib
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 from flask import Flask
 from threading import Thread
 
-# --- Render 存活檢查 (Fake Web Server) ---
+# --- Render 存活檢查 (維持不變) ---
 app = Flask('')
 @app.route('/')
-def home(): return "Quant Bot 4.0: MACD + EMA Strategy Online!"
+def home(): return "Quant Bot 4.0: FinMind Data Engine Online!"
 def run(): app.run(host='0.0.0.0', port=10000)
 def keep_alive(): Thread(target=run).start()
 
@@ -188,54 +188,54 @@ import concurrent.futures
 
 # ... (其他程式碼保持不變) ...
 
-async def fetch_single_stock_data(symbol):
+def get_finmind_data(symbol):
     """
-    在獨立的線程中抓取單檔股票數據，避免阻塞主線程。
+    透過 FinMind API 獲取台股過去一年的歷史資料，並轉換成相容的格式
     """
-    loop = asyncio.get_running_loop()
-    try:
-        # 使用 run_in_executor 在背景執行同步的 yfinance 查詢
-        df = await loop.run_in_executor(None, lambda: yf.Ticker(symbol).history(period="1y"))
-        return symbol, df
-    except Exception as e:
-        print(f"抓取 {symbol} 失敗: {e}")
-        return symbol, pd.DataFrame() # 失敗回傳空 DataFrame
+    # 1. 處理代號轉換 (把 2330.TW 變成 2330，把 ^TWII 變成 TAIEX)
+    stock_id = symbol.replace('.TW', '')
+    if stock_id == '^TWII': 
+        stock_id = 'TAIEX'
 
-async def fetch_single_stock_data(symbol):
-    """
-    使用自訂 Session 抓取資料，並解開超時限制，讓 Render 慢慢算
-    """
-    loop = asyncio.get_running_loop()
+    # 2. 設定抓取時間 (過去 365 天)
+    start_date = (datetime.now() - timedelta(days=365)).strftime('%Y-%m-%d')
+    url = "https://api.finmindtrade.com/api/v4/data"
+    params = {
+        "dataset": "TaiwanStockPrice",
+        "data_id": stock_id,
+        "start_date": start_date
+    }
+
     try:
-        df = await loop.run_in_executor(
-            None, 
-            lambda: yf.Ticker(symbol, session=session).history(period="1y")
-        )
-        return symbol, df
+        res = requests.get(url, params=params, timeout=10)
+        data = res.json()
+        
+        # 3. 如果成功抓到資料，轉換成原本程式看得懂的格式 (DataFrame)
+        if data.get("msg") == "success" and len(data.get("data", [])) > 0:
+            df = pd.DataFrame(data["data"])
+            df['date'] = pd.to_datetime(df['date'])
+            df.set_index('date', inplace=True)
+            df.rename(columns={'close': 'Close'}, inplace=True) # 把小寫 close 換成大寫 Close
+            return df
     except Exception as e:
-        print(f"抓取 {symbol} 失敗: {e}")
-        return symbol, pd.DataFrame()
+        print(f"FinMind API 錯誤 ({stock_id}): {e}")
+        
+    return pd.DataFrame() # 失敗回傳空資料
 
 async def fetch_single_stock_data(symbol, retries=2):
     """
-    加入「重試機制」，如果第一次抓不到，等一秒再抓一次
+    非同步包裝，避免卡住 Discord 機器人
     """
     loop = asyncio.get_running_loop()
     for attempt in range(retries):
-        try:
-            df = await loop.run_in_executor(
-                None, 
-                lambda: yf.Ticker(symbol, session=session).history(period="1y")
-            )
-            # 只要有抓到資料，就立刻回傳
-            if not df.empty and len(df) > 0:
-                return symbol, df
-        except Exception as e:
-            print(f"抓取 {symbol} 失敗 (嘗試 {attempt+1}): {e}")
+        df = await loop.run_in_executor(None, get_finmind_data, symbol)
         
-        await asyncio.sleep(1) # 休息 1 秒後重試
+        if not df.empty and len(df) > 0:
+            return symbol, df
+            
+        await asyncio.sleep(1) # 抓不到就休息一秒再試
         
-    return symbol, pd.DataFrame() # 真的抓不到才回傳空值
+    return symbol, pd.DataFrame()
 
 async def perform_scan(force_send=False):
     channel = bot.get_channel(int(CHANNEL_ID))
