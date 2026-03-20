@@ -34,20 +34,35 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 # ==========================================
 # 2. 核心 50 檔旗艦觀察名單
 # ==========================================
+# ==========================================
+# 2. 台股前瞻科技戰略包 (AI伺服器 + Rubin架構 + 低軌衛星)
+# ==========================================
 STOCK_NAMES = {
-    "2330.TW": "台積電", "2454.TW": "聯發科", "2303.TW": "聯電", "3711.TW": "日月光投控",
-    "2379.TW": "瑞昱", "3008.TW": "大立光", "3034.TW": "聯詠", "2308.TW": "台達電",
-    "3037.TW": "欣興", "6415.TW": "矽力*-KY", "2317.TW": "鴻海", "2382.TW": "廣達", 
-    "3231.TW": "緯創", "2357.TW": "華碩", "6669.TW": "緯穎", "2324.TW": "仁寶", 
-    "3017.TW": "奇鋐", "4938.TW": "和碩", "2301.TW": "光寶科", "2345.TW": "智邦", 
-    "2395.TW": "研華", "2881.TW": "富邦金", "2882.TW": "國泰金", "2891.TW": "中信金", 
-    "2886.TW": "兆豐金", "2884.TW": "玉山金", "2892.TW": "第一金", "2885.TW": "元大金", 
-    "5880.TW": "合庫金", "2880.TW": "華南金", "2883.TW": "開發金", "2887.TW": "台新金", 
-    "2890.TW": "永豐金", "5871.TW": "中租-KY", "2603.TW": "長榮", "2609.TW": "陽明", 
-    "2615.TW": "萬海", "2002.TW": "中鋼", "1101.TW": "台泥", "1301.TW": "台塑", 
-    "1303.TW": "南亞", "1326.TW": "台化", "1590.TW": "亞德客-KY", "2207.TW": "和泰車", 
-    "9904.TW": "寶成", "2412.TW": "中華電", "3045.TW": "台灣大", "4904.TW": "遠傳",
-    "1216.TW": "統一", "2912.TW": "統一超"
+    # 🌟【NVIDIA Rubin 架構概念股】(先進封裝、HBM測試、矽光子CPO、次世代散熱)
+    "2330.TW": "台積電", "3711.TW": "日月光投控", "3450.TW": "聯鈞", "6442.TW": "光聖",
+    "3363.TW": "上詮", "3163.TW": "波若威", "4979.TW": "華星光", "6223.TW": "旺矽",
+    "6515.TW": "穎崴", "3653.TW": "健策", "3324.TW": "雙鴻", "3017.TW": "奇鋐",
+    "8996.TW": "高力", "3189.TW": "景碩", "3037.TW": "欣興", "2368.TW": "金像電",
+
+    # 🚀【AI 伺服器 & 零組件大軍】(代工廠、機殼、滑軌、BMC、電源)
+    "2382.TW": "廣達", "3231.TW": "緯創", "6669.TW": "緯穎", "2376.TW": "技嘉",
+    "2356.TW": "英業達", "2357.TW": "華碩", "2377.TW": "微星", "3706.TW": "神達",
+    "2059.TW": "川湖", "5274.TW": "信驊", "2308.TW": "台達電", "2301.TW": "光寶科",
+    "6117.TW": "迎廣", "8210.TW": "勤誠", "3693.TW": "營邦", "3032.TW": "偉訓",
+
+    # 🛰️【低軌衛星 LEO 概念股】(網通設備、微波元件、地面接收站、衛星PCB)
+    "3491.TW": "昇達科", "6285.TW": "啟碁", "2383.TW": "華通", "3138.TW": "耀登",
+    "2314.TW": "台揚", "3062.TW": "建漢", "2312.TW": "金寶", "3305.TW": "昇貿",
+    "6282.TW": "康舒", "2412.TW": "中華電", 
+
+    # 🛡️【護國群山 & 大型權值股】(維持大盤敏感度與防禦力)
+    "2454.TW": "聯發科", "2317.TW": "鴻海", "3008.TW": "大立光", "2303.TW": "聯電",
+    "2881.TW": "富邦金", "2882.TW": "國泰金", "2891.TW": "中信金", "2603.TW": "長榮",
+    "2609.TW": "陽明", "1519.TW": "華城", "1514.TW": "亞力", "1503.TW": "士電",
+    
+    # 📈【大盤與高股息 ETF】(用來判斷大盤水位與資金避風港)
+    "0050.TW": "元大台灣50", "0056.TW": "元大高股息", "00878.TW": "國泰永續高股息",
+    "00929.TW": "復華台灣科技優息"
 }
 WATCHLIST = list(STOCK_NAMES.keys())
 REVERSE_STOCK_NAMES = {v: k for k, v in STOCK_NAMES.items()}
@@ -279,102 +294,125 @@ async def fetch_single_stock_data(symbol, retries=2):
         
     return symbol, pd.DataFrame()
 
+# ==========================================
+# 7. 華爾街 AI 多因子評分掃描引擎 (Quant Multi-Factor Model)
+# ==========================================
 async def perform_scan(force_send=False):
     channel = bot.get_channel(int(CHANNEL_ID))
     if not channel: return
-
-    p = load_portfolio()
-    msg_lines = []
     
-    # 1. 處理入金
-    curr_month = datetime.now().strftime("%Y-%m")
-    if p.get("last_month", "") != curr_month:
-        p["cash"] = p.get("cash", 0.0) + INVEST_AMOUNT
-        p["last_month"] = curr_month
-        msg_lines.append(f"🏦 **入金成功**：帳戶已存入 {INVEST_AMOUNT} 元，可用現金：`{p['cash']:.0f}`")
-
-    # 2. 判斷大盤 (雙重保險：先看大盤指數，抓不到再看 0050)
-    _, df_market = await fetch_single_stock_data("^TWII")
-    market_name = "加權指數 (^TWII)"
-    
-    if df_market.empty:
-        _, df_market = await fetch_single_stock_data("0050.TW")
-        market_name = "台灣 50 (0050)"
-
-    if df_market.empty:
-        msg_lines.append("⚠️ 警告：Yahoo API 異常，大盤與 0050 皆無法取得數據！保護機制啟動，暫停買進。")
-        is_bull_market = False
-    else:
-        ma60_market = df_market['Close'].tail(60).mean()
-        is_bull_market = df_market['Close'].iloc[-1] > ma60_market
-        if not is_bull_market:
-            msg_lines.append(f"🛑 **【大盤警報】** {market_name} 目前位於季線之下。空頭市場嚴禁做多，維持觀望！")
-
-    # 3. 如果大盤是多頭，開始掃描 50 檔
+    scan_msg = await channel.send("🦅 啟動「華爾街 AI 多因子評分模型」！正在計算台股旗艦陣容的綜合量化分數 (約需 1~2 分鐘)...")
     results = []
-    if is_bull_market:
-        scan_msg = await channel.send(f"✅ 大盤 ({market_name}) 確認偏多！正在逐檔掃描 50 檔成分股的 MACD 狀態，約需 30~60 秒...")
+
+    for s in WATCHLIST:
+        _, df = await fetch_single_stock_data(s)
+        if df.empty or len(df) < 200: continue
         
-        for s in WATCHLIST:
-            _, df = await fetch_single_stock_data(s)
-            if df.empty or len(df) < 200: 
-                await asyncio.sleep(0.5)
-                continue
-            
+        try:
             close = df['Close']
+            vol = df['Volume']
+            
+            # --- 因子計算區 ---
             ema200 = close.ewm(span=200, adjust=False).mean()
             macd = close.ewm(span=12, adjust=False).mean() - close.ewm(span=26, adjust=False).mean()
             sig = macd.ewm(span=9, adjust=False).mean()
             
-            # 策略：站上 200EMA + 零軸下金叉
-            if (close.iloc[-1] > ema200.iloc[-1]) and (macd.iloc[-2] < sig.iloc[-2]) and (macd.iloc[-1] > sig.iloc[-1]) and (macd.iloc[-1] < 0):
-                results.append({'symbol': s, 'price': close.iloc[-1], 'score': macd.iloc[-1] - sig.iloc[-1]})
+            delta = close.diff()
+            up = delta.clip(lower=0)
+            down = -1 * delta.clip(upper=0)
+            rsi = 100 - (100 / (1 + up.ewm(com=13, adjust=False).mean() / down.ewm(com=13, adjust=False).mean()))
             
-            await asyncio.sleep(0.5) # 乖乖排隊不塞車
-        
-        try:
-            await scan_msg.delete()
-        except: pass
+            ma20 = close.rolling(window=20).mean()
+            std20 = close.rolling(window=20).std()
+            upper_bb = ma20 + (2 * std20)
+            vol_ma20 = vol.rolling(window=20).mean() # 20日均量 (月均量)
 
-        if not results:
-            msg_lines.append("🔎 **【掃描結果】** 巡邏了 50 檔旗艦股，目前 **無任何一檔** 發生「零軸下 MACD 黃金交叉」。策略嚴格執行，不胡亂追高！")
+            # --- 取得最新一日數據 ---
+            c_price = close.iloc[-1]
+            c_macd = macd.iloc[-1]
+            c_sig = sig.iloc[-1]
+            c_rsi = rsi.iloc[-1]
+            c_vol = vol.iloc[-1]
+            c_vol_ma20 = vol_ma20.iloc[-1]
 
-    # 4. 檢查現有持股 (移動停利)
-    for sym, data_p in list(p.get("holdings", {}).items()):
-        _, df = await fetch_single_stock_data(sym)
-        if df.empty: continue
-        
-        curr_p = df['Close'].iloc[-1]
-        ema200 = df['Close'].ewm(span=200, adjust=False).mean().iloc[-1]
-        if curr_p > data_p["high_price"]: data_p["high_price"] = curr_p
+            # =======================================
+            # 🧠 華爾街 AI 評分核心邏輯 (滿分 100)
+            # =======================================
+            score = 0
+            badges = []
+
+            # 【因子 1】趨勢與動能 (Max 35)
+            if c_price > ema200.iloc[-1]: score += 15
+            if c_macd > c_sig: score += 10
+            if c_macd > 0: score += 10 # 站上零軸代表強勢多頭
+
+            # 【因子 2】聰明錢主力動能 (Max 30)
+            vol_ratio = c_vol / c_vol_ma20 if c_vol_ma20 > 0 else 0
+            vol_score = min(30, int(vol_ratio * 10)) # 倍數越高分數越高，最高30
+            score += vol_score
+            if vol_score >= 20: badges.append("🔥主力爆量")
+
+            # 【因子 3】爆發力道 (Max 20)
+            if c_price > upper_bb.iloc[-1]:
+                score += 20
+                badges.append("🌋突破壓力")
+            elif c_price > ma20.iloc[-1]:
+                score += 10 # 至少站上月線
+
+            # 【因子 4】時機與風險懲罰 (Max 15)
+            if 55 <= c_rsi <= 65:
+                score += 15
+                badges.append("🎯完美時機")
+            elif 50 < c_rsi < 55 or 65 < c_rsi <= 70:
+                score += 10
+            elif c_rsi > 70:
+                score += 5 # 超買過熱，降低給分
+                badges.append("⚠️留意追高")
+
+            # --- 嚴格的初選濾網 ---
+            # AI 不會買垃圾股：總分必須大於 60 分 (及格)，且 MACD 必須大於訊號線才算準備發動
+            if score >= 60 and c_macd > c_sig:
+                results.append({
+                    'symbol': s,
+                    'name': STOCK_NAMES.get(s, s),
+                    'price': c_price,
+                    'score': score,
+                    'vol_ratio': vol_ratio,
+                    'badges': badges
+                })
+        except Exception as e:
+            continue
             
-        if curr_p < ema200 or curr_p < data_p["high_price"] * 0.85:
-            sell_val = data_p["shares"] * curr_p
-            profit_pct = ((curr_p - data_p["avg_cost"]) / data_p["avg_cost"]) * 100
-            p["cash"] += sell_val
-            name = STOCK_NAMES.get(sym, sym)
-            msg_lines.append(f"🚨 **自動平倉**：{name} 觸發保護機制。賣出價 `{curr_p:.1f}` (報酬率 `{profit_pct:.1f}%`)")
-            del p["holdings"][sym]
+        await asyncio.sleep(0.5)
+        
+    try: await scan_msg.delete()
+    except: pass
 
-    # 5. 執行買進
-    results.sort(key=lambda x: x['score'], reverse=True)
-    if results and p.get("cash", 0) > 1000:
-        targets = results[:2]
-        budget = p["cash"] / len(targets)
-        for target in targets:
-            sym = target['symbol']
-            if sym not in p.get("holdings", {}):
-                shares = int(budget // target['price'])
-                if shares > 0:
-                    p["cash"] -= shares * target['price']
-                    if "holdings" not in p: p["holdings"] = {}
-                    p["holdings"][sym] = {"shares": shares, "avg_cost": target['price'], "high_price": target['price']}
-                    msg_lines.append(f"🛒 **策略進場**：完美捕捉起漲點！買入 {STOCK_NAMES.get(sym, sym)} `{shares}` 股。")
+    # --- 排序與輸出報告 ---
+    msg_lines = []
+    if results:
+        # AI 排序邏輯：總分優先，如果總分一樣，看誰的主力進場量(vol_ratio)更大！
+        results.sort(key=lambda x: (x['score'], x['vol_ratio']), reverse=True)
+        
+        msg_lines.append(f"🤖 **【AI 多因子量化掃描結果】** (篩選出 {len(results)} 檔強勢股)")
+        msg_lines.append("`量化維度：趨勢動能(35%) + 主力籌碼(30%) + 突破爆發(20%) + 風險時機(15%)`\n")
+        
+        for idx, r in enumerate(results):
+            # 限制只顯示前 10 名，避免版面過長
+            if idx >= 10: break
+            
+            rank_icon = "👑" if idx == 0 else ("🥈" if idx == 1 else ("🥉" if idx == 2 else "🔹"))
+            badge_str = " ".join(r['badges']) if r['badges'] else "溫和上漲"
+            
+            msg_lines.append(f"{rank_icon} **Top {idx+1}: {r['symbol']} {r['name']}**")
+            msg_lines.append(f"> 📊 綜合評分: **`{r['score']}分`** (現價 `${r['price']:.2f}`) | 成交量達均量 `{r['vol_ratio']:.1f}倍`")
+            msg_lines.append(f"> 🏷️ AI 標籤: {badge_str}\n")
+    else:
+        msg_lines.append("🔎 AI 巡邏完畢，目前市場資金動能不足，無任何股票達到 60 分及格線。")
 
-    save_portfolio(p)
     if force_send or msg_lines:
-        final_msg = "🛰️ **【量化艦隊執行報告】**\n" + "\n".join(msg_lines)
-        await channel.send(final_msg[:2000])
+        final_msg = "\n".join(msg_lines)
+        await channel.send(final_msg[:1990])
 async def show_portfolio(channel):
     p = load_portfolio()
     msg = f"💼 **帳本狀態**\n現金：`{p['cash']:.0f}` 元\n"
